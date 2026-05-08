@@ -41,7 +41,12 @@ unlock access to their account.
 
 ```hcl
 role "atproto-write" {
+  # actx here will be replaced with `did:plc:...` of your agent
   aud      = "api://ATProto?actx={actx}"
+  # TODO This just happens to be the same for this PoC but in reality we would
+  # configure this piror to ccb x402 (ccba is tbd if before or after x402) using
+  # the ccb.wif.issuer_uri value.
+  iss      = "https://droplet-oidc.its1337.com"
   # TODO Replace 4959ec0923473bf22bddd7bec2caf58a294ee007 with your actual team UUID!
   # doctl account get -o json | jq -r .team.uuid
   sub      = "actx:4959ec0923473bf22bddd7bec2caf58a294ee007:plc:5svqtrhheairglgiiyvutzik:role:atproto-write"
