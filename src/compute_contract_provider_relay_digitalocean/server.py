@@ -10,6 +10,7 @@ import contextlib
 import urllib.request
 from typing import Any, Annotated
 
+import aiohttp
 import markdown2
 from pydantic import BaseModel
 from atproto import AsyncClient, models
@@ -300,10 +301,6 @@ async def create_droplet(ccrfp, ccb):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DO_TOKEN}",
     }
-    request = urllib.request.Request(
-        "http://droplet-oidc.its1337.com/v2/droplets",
-        headers=headers,
-    )
     request_obj = DOv2DropletCreateRequest(
         name=f"{ccrfp._uri.split("/")[2].split(":")[-1]}-{ccrfp._uri.split("/")[4]}-{ccrfp._cid}",
         # TODO pick based off ccrfp.location
@@ -318,14 +315,19 @@ async def create_droplet(ccrfp, ccb):
         ],
     )
     snoop.pp(json.loads(request_obj.model_dump_json()))
-    return
     request_bytes = request_obj.model_dump_json().encode()
     # TODO aiohttp.ClientSession should be in lifecycle
     async with aiohttp.ClientSession() as session:
-        async with session.post("/post", data=request_bytes) as response:
-            response_body = await response.json()
-            if resp.status >= 400:
-                raise Exception(response_body)
+        async with session.post(
+            "https://droplet-oidc.its1337.com/v2/droplets",
+            data=request_bytes,
+            headers=headers,
+        ) as response:
+            response_json = await response.json()
+            snoop.pp(response_json)
+            if response.status >= 400:
+                raise Exception(response_json)
+    return response_json
 
 
 @app.get("/ccr/{full_path:path}")
