@@ -8,6 +8,16 @@
 X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run src/compute_contract_provider_relay_digitalocean/server.py; test 1"
 
 curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy | jq
+
+$ npx awal x402 pay https://compute-contract.johnandersen777.bsky.social.fedproxy.com/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy
+✓ Request completed (HTTP 200)
+
+Response:
+{
+  "id": "3mld67yj3xo2u",
+  "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccr/3mld67yj3xo2u",
+  "cid": "bafyreibzynxkkoxxvppbfoeh5s2s2asrm2j7ziw2ol5ufau4q25d7ousiy"
+}
 ```
 
 ## RBAC: droplet-oidc-poc
