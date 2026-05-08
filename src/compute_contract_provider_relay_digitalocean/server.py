@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 import hashlib
@@ -12,8 +13,15 @@ from typing import Any, Annotated
 import markdown2
 from pydantic import BaseModel
 from atproto import AsyncClient, models
-from fastapi import FastAPI, File, UploadFile, Request, Response, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import (
+    FastAPI,
+    File,
+    UploadFile,
+    Request,
+    Response,
+    HTTPException,
+)
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import snoop
 from fastapi import FastAPI, Request
@@ -126,16 +134,14 @@ async def lifespan(app: FastAPI):
             "highlightjs-lang",
         ],
     )
-    markdown_html_content_by_file["README.md"] = textwrap.dedent(
-        f"""
+    markdown_html_content_by_file["README.md"] = textwrap.dedent(f"""
         <html>
             <title>{markdown_content.split("\n")[0].replace("# ", "")}</title>
             <body>
                 {readme_markdown_html}
             </body>
         </html>
-        """.strip()
-    )
+        """.strip())
 
     profile = await client.login(
         atproto_handle,
@@ -157,7 +163,7 @@ app = FastAPI(lifespan=lifespan)
 
 # Define protected routes
 routes: dict[str, RouteConfig] = {
-    "GET /": RouteConfig(
+    "GET /ccr/*": RouteConfig(
         accepts=[
             PaymentOption(
                 scheme="exact",
@@ -180,22 +186,128 @@ async def root():
     return markdown_html_content_by_file["README.md"]
 
 
-@app.get("/ccr")
-async def make_ccr(request: Request) -> dict[str, Any]:
-    post = await client.com.atproto.repo.create_record(
+class JSONError(BaseModel):
+    error: str
+    code: int | None = None
+    detail: str | None = None
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    payload = JSONError(
+        error="http_error",
+        code=exc.status_code,
+        detail=exc.detail or "",
+    ).dict(exclude_none=True)
+    return JSONResponse(status_code=exc.status_code, content=payload)
+
+
+CID_RE = re.compile(r"^(bafy|z)[A-Za-z0-9]+$")
+
+
+class ATProtoRecordRef(BaseModel):
+    uri: str
+    cid: str
+
+
+class CCRFP_v0_0_0(BaseModel):
+    mem: str
+    cpus: int
+    disk: str
+    network: str
+
+
+class CCB_v0_0_0_Embed(BaseModel):
+    record: ATProtoRecordRef
+
+
+class CCB_v0_0_0(BaseModel):
+    embed: CCB_v0_0_0_Embed
+
+
+@app.get("/ccr/{full_path:path}")
+async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
+    # Parse CCB
+    path = request.url.path.lstrip("/")
+    # split last segment as cid
+    if "/" not in path:
+        raise HTTPException(400, "missing cid")
+    at_part, cid = path.rsplit("/", 1)
+    if not CID_RE.match(cid):
+        raise HTTPException(400, "invalid cid")
+    if at_part.startswith("ccr/"):
+        at_part = at_part[len("ccr/") :]
+    at_uri = at_part
+
+    # Resolve CCB
+    ccb_at_uri = at_uri
+    ccb_cid = cid
+    record_ccb_params = models.ComAtprotoRepoGetRecord.Params(
+        rkey=ccb_at_uri.split("/")[-1],
+        repo=ccb_at_uri.split("/")[2],
+        collection=ccb_at_uri.split("/")[3],
+        uri=ccb_at_uri,
+        cid=ccb_cid,
+    )
+    snoop.pp(record_ccb_params)
+    record_ccb = await client.com.atproto.repo.get_record(
+        record_ccb_params,
+    )
+    snoop.pp(record_ccb)
+    record_ccb_value = record_ccb.value.to_dict()
+    ccb_version = record_ccb_value.get("version", "0.0.0")
+    # TODO Log warning on no version
+    if ccb_version == "0.0.0":
+        ccb = CCB_v0_0_0.model_validate(record_ccb_value)
+    else:
+        raise HTTPException(400, f"unknown CCB version {ccb_version}")
+
+    snoop.pp(ccb)
+
+    # Resolve CCRFP
+    record_ccrfp_params = models.ComAtprotoRepoGetRecord.Params(
+        rkey=ccb_at_uri.split("/")[-1],
+        repo=ccb_at_uri.split("/")[2],
+        collection=ccb_at_uri.split("/")[3],
+        uri=ccb_at_uri,
+        cid=ccb_cid,
+    )
+    snoop.pp(record_ccrfp_params)
+    record_ccrfp = await client.com.atproto.repo.get_record(
+        record_ccrfp_params,
+    )
+    snoop.pp(record_ccrfp)
+    ccrfp_at_uri = record_ccrfp.uri
+    ccrfp_cid = record_ccrfp.cid
+
+    # Create CCR
+    record_ccr = await client.com.atproto.repo.create_record(
         models.ComAtprotoRepoCreateRecord.Data(
             repo=client.me.did,
             collection="com.publicdomainrelay.ccr",
             record={
-                "feed": "face",
+                "rfp": {
+                    "$type": "com.publicdomainrelay.ccrfp",
+                    "record": {
+                        "uri": ccrfp_at_uri,
+                        "cid": ccrfp_cid,
+                    },
+                },
+                "bid": {
+                    "$type": "com.publicdomainrelay.ccb",
+                    "record": {
+                        "uri": ccb_at_uri,
+                        "cid": ccb_cid,
+                    },
+                },
                 "createdAt": client.get_current_time_iso(),
             },
         ),
     )
     return {
-        "id": post.uri.split("/")[-1],
-        "uri": post.uri,
-        "cid": post.cid,
+        "id": record_ccr.uri.split("/")[-1],
+        "uri": record_ccr.uri,
+        "cid": record_ccr.cid,
     }
 
 
