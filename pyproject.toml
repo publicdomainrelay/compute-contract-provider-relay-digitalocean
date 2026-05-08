@@ -1,0 +1,41 @@
+[project]
+name = "compute-contract-provider-relay-digitalocean"
+version = "0.1.0"
+description = "Example of using a fastapi server with x402 middleware"
+# readme = "README.md"
+authors = [
+    { name = "publicdomainrelay", email = "publicdomainrelay@protonmail.com" },
+]
+requires-python = ">=3.10"
+keywords = ["x402", "payment", "protocol", "http", "402"]
+dependencies = [
+    "x402[fastapi,evm,svm]",
+    "python-dotenv>=1.2.1",
+    "uvicorn[standard]>=0.40.0",
+    "cdp-sdk",
+    "snoop",
+    "atproto>=0.0.55",
+    "uvicorn[standard]>=0.32.1",
+    "fastapi[standard]>=0.115.5",
+    "pillow>=11.0.0",
+    "python-magic>=0.4.27",
+    "python-multipart>=0.0.19",
+    "pygments>=2.18.0",
+    "pydantic>=2.10.2",
+    "markdown2>=2.5.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+    "black>=23.0.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
