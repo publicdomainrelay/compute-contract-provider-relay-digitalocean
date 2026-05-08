@@ -46,6 +46,8 @@ pay_to = os.environ["RECV_ADDR"]
 # Coinbase Developer Platform Facilitator auth
 os.environ["CDP_API_KEY_ID"] = os.environ["CDP_RECV_API_KEY_ID"]
 os.environ["CDP_API_KEY_SECRET"] = os.environ["CDP_RECV_API_KEY_SECRET"]
+# DO_TOKEN
+DO_TOKEN = os.environ["DIGITALOCEAN_TOKEN"]
 
 
 # Generate the JWT using the CDP SDK
@@ -178,7 +180,8 @@ routes: dict[str, RouteConfig] = {
 }
 
 # Add payment middleware
-# app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
+if not "X402_MAKE_FREE" in os.environ:
+    app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -228,6 +231,9 @@ class CCRFP_v0_0_0(BaseModel):
     role: str
     user_data: str
 
+    _uri: str = None
+    _cid: str = None
+
 
 class CCB_v0_0_0_Embed(BaseModel):
     record: ATProtoRecordRef
@@ -257,6 +263,69 @@ class CCB_v0_0_0_Bid(BaseModel):
 
 class CCB_v0_0_0(BaseModel):
     embed: CCB_v0_0_0_Embed
+
+
+from typing import List, Optional, Union
+from pydantic import BaseModel, Field, constr
+
+SlugStr = constr(min_length=1)
+
+
+class DropletCreateImage(BaseModel):
+    slug: Optional[SlugStr] = None
+    id: Optional[int] = None
+    name: Optional[str] = None
+
+
+class DOv2DropletCreateRequest(BaseModel):
+    name: constr(min_length=1) = Field(..., description="Droplet name")
+    region: constr(min_length=1) = Field(..., description="Region slug, e.g. 'sfo3'")
+    size: constr(min_length=1) = Field(
+        ..., description="Size slug, e.g. 's-1vcpu-512mb-10gb'"
+    )
+    image: Union[SlugStr, DropletCreateImage] = Field(
+        ..., description="Image slug or object with slug/id/name"
+    )
+    user_data: Optional[str] = Field(None, description="cloud-init user data")
+    tags: Optional[List[str]] = Field(None, description="Tags to apply")
+    with_droplet_agent: Optional[bool] = Field(
+        None, description="Whether to install the DigitalOcean agent"
+    )
+
+
+async def create_droplet(ccrfp, ccb):
+    global DO_TOKEN
+    # TODO Run this under a workload id droplet
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DO_TOKEN}",
+    }
+    request = urllib.request.Request(
+        "http://droplet-oidc.its1337.com/v2/droplets",
+        headers=headers,
+    )
+    request_obj = DOv2DropletCreateRequest(
+        name=f"{ccrfp._uri.split("/")[2].split(":")[-1]}-{ccrfp._uri.split("/")[4]}-{ccrfp._cid}",
+        # TODO pick based off ccrfp.location
+        region="sfo3",
+        size="s-1vcpu-512mb-10gb",
+        image="ubuntu-24-04-x64",
+        user_data=ccrfp.user_data,
+        with_droplet_agent=True,
+        tags=[
+            f'oidc-sub:plc:{ccrfp._uri.split("/")[2].split(":")[-1]}',
+            f"oidc-sub:role:{ccrfp.role}",
+        ],
+    )
+    snoop.pp(json.loads(request_obj.model_dump_json()))
+    return
+    request_bytes = request_obj.model_dump_json().encode()
+    # TODO aiohttp.ClientSession should be in lifecycle
+    async with aiohttp.ClientSession() as session:
+        async with session.post("/post", data=request_bytes) as response:
+            response_body = await response.json()
+            if resp.status >= 400:
+                raise Exception(response_body)
 
 
 @app.get("/ccr/{full_path:path}")
@@ -313,6 +382,20 @@ async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
     snoop.pp(record_ccrfp)
     ccrfp_at_uri = record_ccrfp.uri
     ccrfp_cid = record_ccrfp.cid
+    # Get CCRFP value
+    record_ccrfp_value = record_ccrfp.value.to_dict()
+    ccrfp_version = record_ccrfp_value.get("version", "0.0.0")
+    # TODO Log warning on no version
+    if ccrfp_version == "0.0.0":
+        ccrfp = CCRFP_v0_0_0.model_validate(record_ccrfp_value)
+    else:
+        raise HTTPException(400, f"unknown CCRFP version {ccrfp_version}")
+    ccrfp._uri = ccrfp_at_uri
+    ccrfp._cid = ccrfp_cid
+
+    # TODO Retry Droplet creation if failed
+    # Spin Droplet
+    await create_droplet(ccrfp, ccb)
 
     # Create CCR
     record_ccr = await client.com.atproto.repo.create_record(

@@ -2,6 +2,14 @@
 
 - <https://github.com/publicdomainrelay/compute-contract>
 
+## Testing
+
+```bash
+X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run src/compute_contract_provider_relay_digitalocean/server.py; test 1"
+
+curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy | jq
+```
+
 ## RBAC: droplet-oidc-poc
 
 droplet-oidc-poc enforces actx but other fields are enforced at the
