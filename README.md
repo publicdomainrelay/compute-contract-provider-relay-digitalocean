@@ -1,3 +1,64 @@
 # Compute Contract Provider Relay DigitalOcean
 
 - <https://github.com/publicdomainrelay/compute-contract>
+
+## RBAC: droplet-oidc-poc
+
+droplet-oidc-poc enforces actx but other fields are enforced at the
+RBAC level. To really trust it for this use case it would also need to
+enforce the plc field. As long as the actx owner only creates RBAC which enforce
+plc then it should be fine.
+
+#### policies/ex.hcl
+
+```hcl
+path "/v1/oidc/issue" {
+  capabilities = ["create"]
+  allowed_parameters = {
+    "aud" = "*"
+    "sub" = "actx:{actx}:plc:{did-plc-key}:role:*"
+    "ttl" = 3600
+  }
+}
+```
+
+#### droplet-roles/ex.hcl
+
+```hcl
+role "ex" {
+  aud      = "api://DigitalOcean?actx={actx}"
+  sub      = "actx:{actx}:plc:{did-plc-key}:role:*"
+  policies = ["ex"]
+}
+```
+
+### End-user
+
+OAuth your agent's account and write a policy that allows your `did:plc:...` to
+unlock access to their account.
+
+#### roles/atproto-write.hcl
+
+```hcl
+role "atproto-write" {
+  aud      = "api://ATProto?actx={actx}"
+  # TODO Replace 4959ec0923473bf22bddd7bec2caf58a294ee007 with your actual team UUID!
+  # doctl account get -o json | jq -r .team.uuid
+  sub      = "actx:4959ec0923473bf22bddd7bec2caf58a294ee007:plc:5svqtrhheairglgiiyvutzik:role:atproto-write"
+  policies = ["atproto-write"]
+}
+```
+
+This does the replacement using `doctl` and `sed`.
+
+```bash
+sed -i "s/4959ec0923473bf22bddd7bec2caf58a294ee007/$(doctl account get -o json | jq -r .team.uuid)/g" roles/atproto-write.hcl
+```
+
+#### policies/atproto-write.hcl
+
+```hcl
+path "/xrpc/com.atproto.repo.createRecord" {
+  capabilities = ["create"]
+}
+```
