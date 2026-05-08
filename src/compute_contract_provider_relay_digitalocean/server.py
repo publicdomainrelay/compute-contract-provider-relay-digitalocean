@@ -7,6 +7,7 @@ import pathlib
 import tempfile
 import textwrap
 import contextlib
+import subprocess
 import urllib.request
 from typing import Any, Annotated
 
@@ -49,6 +50,7 @@ os.environ["CDP_API_KEY_ID"] = os.environ["CDP_RECV_API_KEY_ID"]
 os.environ["CDP_API_KEY_SECRET"] = os.environ["CDP_RECV_API_KEY_SECRET"]
 # DO_TOKEN
 DO_TOKEN = os.environ["DIGITALOCEAN_TOKEN"]
+RBAC_REPO_ROOT = pathlib.Path(os.environ["RBAC_REPO_ROOT"]).resolve()
 
 
 # Generate the JWT using the CDP SDK
@@ -294,6 +296,231 @@ class DOv2DropletCreateRequest(BaseModel):
     )
 
 
+class DigitalOceanContext(BaseModel):
+    rbac_repo_root: pathlib.Path
+    team_uuid: str
+
+
+async def make_doctx():
+    global DO_TOKEN
+    # TODO Run this under a workload id droplet
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DO_TOKEN}",
+    }
+    # TODO aiohttp.ClientSession should be in lifecycle
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            "https://droplet-oidc.its1337.com/v2/account",
+            headers=headers,
+        ) as response:
+            response_json = await response.json()
+            snoop.pp(response_json)
+            if response.status >= 400:
+                raise Exception(response_json)
+    return DigitalOceanContext(
+        rbac_repo_root=RBAC_REPO_ROOT,
+        team_uuid=response_json["account"]["team"]["uuid"],
+    )
+
+
+async def asyncio_create_subprocess_exec(cmd, cwd):
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=str(cwd.resolve()),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    returncode = await proc.wait()
+    if returncode != 0:
+        snoop.pp(returncode, stdout, stderr)
+        raise subprocess.CalledProcessError(
+            returncode=returncode,
+            cmd=cmd,
+            output=stdout,
+            stderr=stderr,
+        )
+    return stdout, stderr
+
+
+async def configure_droplet_rbac(
+    doctx,
+    ccrfp,
+    ccb,
+    req: DOv2DropletCreateRequest,
+):
+    # TODO Path validation on role
+    # TODO Maybe put this in an ATProto record or something and reference it
+    rbac_repo_root = doctx.rbac_repo_root
+
+    # Init repo if not exists
+    if not rbac_repo_root.joinpath(".git").is_dir():
+        rbac_repo_root.mkdir(exist_ok=True, parents=True)
+        cred_helper_contents = """
+#!/usr/bin/env bash
+
+TOKEN={token}
+
+while IFS='=' read -r key value; do
+  if [[ -n "$key" && -n "$value" ]]; then
+    if [[ "$key" == "protocol" || "$key" == "host" ]]; then
+      echo "$key=$value"
+    fi
+  fi
+done
+
+echo "username=token"
+# https://git-scm.com/docs/git-credential documents how this style of
+# script works, stdin / stdout is used for communication to / from git
+# and the bash process executing this script. Since we always use the
+# doctl local PAT for authentication to this PoC deployment, we don't need
+# to add custom logic around if this host or if this protocol, we always
+# use the token for the deployed FQDN (git config --global
+# credential."${THIS_ENDPOINT}".helper)
+echo "password=${TOKEN}"
+""".lstrip()
+        # TODO This is bad! Find a new way to do this!
+        cred_helper_contents = cred_helper_contents.replace("{token}", '"' + DO_TOKEN + '"')
+        cred_helper_path = pathlib.Path(
+            "~",
+            ".local",
+            "scripts",
+            "git-credential-rbac-digitalocean.sh",
+        ).expanduser()
+        cred_helper_path.parent.mkdir(exist_ok=True, parents=True)
+        cred_helper_path.write_text(cred_helper_contents)
+        cred_helper_path.chmod(0o700)
+
+        for cmd in [
+            [
+                "git",
+                "config",
+                "--global",
+                r'credential.https://droplet-oidc.its1337.com/_rbac/DigitalOcean/.helper',
+                f"!{cred_helper_path.resolve()}",
+            ],
+            [
+                "git",
+                "init",
+            ],
+            [
+                "git",
+                "remote",
+                "add",
+                "origin",
+                f"https://droplet-oidc.its1337.com/_rbac/DigitalOcean/{doctx.team_uuid}",
+            ],
+            [
+                "git",
+                "pull",
+                "origin",
+                "main",
+            ],
+            [
+                "git",
+                "branch",
+                "--set-upstream-to=origin/main",
+            ],
+        ]:
+            snoop.pp(cmd)
+            await asyncio_create_subprocess_exec(cmd, rbac_repo_root)
+    slug = "-".join(
+        [
+            doctx.team_uuid,
+            ccrfp._uri.split("/")[2].split(":")[-1],
+            ccrfp.role,
+        ],
+    )
+
+    policy_path = rbac_repo_root.joinpath(
+        "policies",
+        f"ex-{slug}.hcl",
+    )
+    policy_ex = """
+path "/v1/oidc/issue" {
+  capabilities = ["create"]
+  allowed_parameters = {
+    "aud" = "*"
+    "sub" = "actx:{actx}:plc:{did-plc-key}:role:{role}"
+    "ttl" = 3600
+  }
+}
+""".lstrip()
+    policy_ex = (
+        policy_ex.replace(
+            "{actx}",
+            doctx.team_uuid,
+        )
+        .replace(
+            "{did-plc-key}",
+            ccrfp._uri.split("/")[2].split(":")[-1],
+        )
+        .replace(
+            "{role}",
+            ccrfp.role,
+        )
+    )
+
+    role_path = rbac_repo_root.joinpath(
+        "droplet-roles",
+        f"ex-{slug}.hcl",
+    )
+    role_ex = """
+role "ex-{slug}" {
+  aud      = "api://DigitalOcean?actx={actx}"
+  sub      = "actx:{actx}:plc:{did-plc-key}:role:{role}"
+  policies = ["ex-{slug}"]
+}
+""".lstrip()
+    role_ex = (
+        role_ex.replace(
+            "{actx}",
+            doctx.team_uuid,
+        )
+        .replace(
+            "{did-plc-key}",
+            ccrfp._uri.split("/")[2].split(":")[-1],
+        )
+        .replace(
+            "{role}",
+            ccrfp.role,
+        )
+        .replace(
+            "{slug}",
+            slug,
+        )
+    )
+
+    policy_path.write_text(policy_ex)
+    role_path.write_text(role_ex)
+
+    for cmd in [
+        [
+            "git",
+            "add",
+            "-A",
+        ],
+        [
+            "git",
+            "commit",
+            "-m",
+            "feat: rbac for compute-contract",
+        ],
+        [
+            "git",
+            "push",
+        ],
+    ]:
+        try:
+            await asyncio_create_subprocess_exec(cmd, rbac_repo_root)
+        except subprocess.CalledProcessError as error:
+            # This happens if ccr occurs against same ccb again
+            if cmd[1] == "commit" and b"nothing to commit" in error.stderr:
+                break
+
+
 async def create_droplet(ccrfp, ccb):
     global DO_TOKEN
     # TODO Run this under a workload id droplet
@@ -315,6 +542,9 @@ async def create_droplet(ccrfp, ccb):
         ],
     )
     snoop.pp(json.loads(request_obj.model_dump_json()))
+    # TODO make_doctx should be in lifecycle
+    doctx = await make_doctx()
+    await configure_droplet_rbac(doctx, ccrfp, ccb, request_obj)
     request_bytes = request_obj.model_dump_json().encode()
     # TODO aiohttp.ClientSession should be in lifecycle
     async with aiohttp.ClientSession() as session:

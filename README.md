@@ -5,7 +5,7 @@
 ## Testing
 
 ```bash
-X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run src/compute_contract_provider_relay_digitalocean/server.py; test 1"
+RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run src/compute_contract_provider_relay_digitalocean/server.py; test 1"
 
 curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy | jq
 
@@ -84,4 +84,48 @@ sed -i "s/4959ec0923473bf22bddd7bec2caf58a294ee007/$(doctl account get -o json |
 path "/xrpc/com.atproto.repo.createRecord" {
   capabilities = ["create"]
 }
+```
+
+## Example
+
+- TODO Subject from compute contract bid, need bid on disk for reference
+
+```bash
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+SSH_PUB=$(cat ~/.ssh/id_ed25519.pub)
+DID_PLC="did:plc:lpfuqerea3deuoyrn7ojser4"
+
+
+URL=$(cat /root/secrets/digitalocean.com/serviceaccount/base_url)
+TEAM_UUID=$(cat /root/secrets/digitalocean.com/serviceaccount/team_uuid)
+ID_TOKEN=$(cat /root/secrets/digitalocean.com/serviceaccount/token)
+
+SUBJECT="actx:${TEAM_UUID}:plc:5svqtrhheairglgiiyvutzik:role:my-cool-role"
+
+TOKEN=$(curl -sf \
+  -H "Authorization: Bearer ${ID_TOKEN}" \
+  -d@<(jq -n -c \
+    --arg aud "api://ATProto?actx=${DID_PLC}" \
+    --arg sub "${SUBJECT}" \
+    --arg ttl 3600 \
+    '{aud: $aud, sub: $sub, ttl: ($ttl | fromjson)}') \
+  "${URL}/v1/oidc/issue" \
+  | jq -r .token)
+
+curl -s \
+  -X POST \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "repo": "'"${DID_PLC}"'",
+        "collection": "com.fedproxy.sshPublicKey",
+        "record": {
+          "$type": "com.fedproxy.sshPublicKey",
+          "key": "'"${SSH_PUB}"'",
+          "service": "'"$(hostname)"'",
+          "name": "'"$(hostname)"'",
+          "createdAt": "'$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")'"
+        }
+      }' \
+  "${URL}/xrpc/com.atproto.repo.createRecord" | jq
 ```
