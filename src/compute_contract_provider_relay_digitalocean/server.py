@@ -221,6 +221,11 @@ class CCRFP_v0_0_0(BaseModel):
     disk: str
     network: str
     location: CCRFP_v0_0_0_Location
+    # Be very careful with this! Your did:plc:... can set whatever it wants!
+    # So agents need their own accounts, because if you give them access to
+    # yours they can just create a new form of compute with the whatever role
+    # they want!
+    role: str
     user_data: str
 
 
@@ -295,11 +300,11 @@ async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
 
     # Resolve CCRFP
     record_ccrfp_params = models.ComAtprotoRepoGetRecord.Params(
-        rkey=ccb_at_uri.split("/")[-1],
-        repo=ccb_at_uri.split("/")[2],
-        collection=ccb_at_uri.split("/")[3],
-        uri=ccb_at_uri,
-        cid=ccb_cid,
+        rkey=ccb.embed.record.uri.split("/")[-1],
+        repo=ccb.embed.record.uri.split("/")[2],
+        collection=ccb.embed.record.uri.split("/")[3],
+        uri=ccb.embed.record.uri,
+        cid=ccb.embed.record.cid,
     )
     snoop.pp(record_ccrfp_params)
     record_ccrfp = await client.com.atproto.repo.get_record(
