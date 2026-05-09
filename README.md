@@ -5,7 +5,11 @@
 ## Testing
 
 ```bash
-RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run src/compute_contract_provider_relay_digitalocean/server.py; test 1"
+python -m venv .venv && . .venv/bin/activate && uv pip install -e .[dev]
+
+. .venv/bin/activate
+
+RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run -m compute_contract_provider_relay_digitalocean.server; test 1"
 
 curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy | jq
 
@@ -91,7 +95,7 @@ path "/xrpc/com.atproto.repo.createRecord" {
 - TODO Subject from compute contract bid, need bid on disk for reference
 
 ```bash
-ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+yes | ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
 SSH_PUB=$(cat ~/.ssh/id_ed25519.pub)
 DID_PLC="did:plc:lpfuqerea3deuoyrn7ojser4"
 
@@ -101,6 +105,8 @@ TEAM_UUID=$(cat /root/secrets/digitalocean.com/serviceaccount/team_uuid)
 ID_TOKEN=$(cat /root/secrets/digitalocean.com/serviceaccount/token)
 
 SUBJECT="actx:${TEAM_UUID}:plc:5svqtrhheairglgiiyvutzik:role:my-cool-role"
+
+SERVICE="$(openssl rand -hex 4)"
 
 TOKEN=$(curl -sf \
   -H "Authorization: Bearer ${ID_TOKEN}" \
@@ -122,10 +128,21 @@ curl -s \
         "record": {
           "$type": "com.fedproxy.sshPublicKey",
           "key": "'"${SSH_PUB}"'",
-          "service": "'"$(hostname)"'",
-          "name": "'"$(hostname)"'",
+          "service": "'"${SERVICE}"'",
+          "name": "'"${SERVICE}"'",
           "createdAt": "'$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")'"
         }
       }' \
   "${URL}/xrpc/com.atproto.repo.createRecord" | jq
+
+echo "Hello World from ${SERVICE} !" > index.html
+
+python -m http.server 8080 &
+
+ssh -NnT -p 2222 \
+  -o UserKnownHostsFile=/dev/null \
+  -o StrictHostKeyChecking=no \
+  -o PasswordAuthentication=no \
+  -R "${SERVICE}:80:127.0.0.1:8080" \
+  aliceoa.bsky.social@fedproxy.com
 ```
