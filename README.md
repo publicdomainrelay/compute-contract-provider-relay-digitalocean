@@ -11,18 +11,32 @@ python -m venv .venv && . .venv/bin/activate && uv pip install -e .[dev]
 
 RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run -m compute_contract_provider_relay_digitalocean.server; test 1"
 
-curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy | jq
+curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccba/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4 | jq
 
-$ npx awal x402 pay https://compute-contract.johnandersen777.bsky.social.fedproxy.com/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccb/3mld4chetvx23/bafyreihb3nbdnrsmdpovctuyhizqifnhqinmzx3ehqd43pqkud2eytbdgy
+$ npx awal x402 pay https://compute-contract.johnandersen777.bsky.social.fedproxy.com/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccba/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4
 ✓ Request completed (HTTP 200)
 
 Response:
 {
   "id": "3mld67yj3xo2u",
-  "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.ccr/3mld67yj3xo2u",
+  "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccr/3mld67yj3xo2u",
   "cid": "bafyreibzynxkkoxxvppbfoeh5s2s2asrm2j7ziw2ol5ufau4q25d7ousiy"
 }
 ```
+
+The `/ccr` route takes the **CCBA** (Compute Contract Bid Accept) AT URI/CID,
+not the CCB. The provider resolves the CCBA, then resolves the CCB and CCRFP
+it references, validates that the CCBA's embedded CCRFP matches the one the
+CCB embedded, spins the compute, and writes a CCR record referencing CCRFP,
+CCB, and CCBA.
+
+All record collection / `$type` names live under the
+`com.publicdomainrelay.temp.*` namespace while the schemas are pre-stable
+(e.g. `com.publicdomainrelay.temp.ccrfp`). Once stable they will move to
+`com.publicdomainrelay.<name>` and evolve additively; genuine breaking
+changes get a numeric suffix (`ccrfpV2`, `ccrfpV3`, …). Lexicons for every
+type live in this repo under [`lexicons/`](./lexicons) and upstream at
+<https://github.com/publicdomainrelay/compute-contract/tree/main/lexicons>.
 
 ## RBAC: droplet-oidc-poc
 

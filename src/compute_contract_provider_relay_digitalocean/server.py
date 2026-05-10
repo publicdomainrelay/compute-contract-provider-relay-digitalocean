@@ -505,11 +505,29 @@ async def create_droplet(ccrfp, ccb):
     return response_json
 
 
+async def _get_record(at_uri: str, cid: str):
+    repo, collection, rkey = parse_at_uri(at_uri)
+    params = models.ComAtprotoRepoGetRecord.Params(
+        rkey=rkey,
+        repo=repo,
+        collection=collection,
+        uri=at_uri,
+        cid=cid,
+    )
+    snoop.pp(params)
+    return await client.com.atproto.repo.get_record(params)
+
+
+def _record_version(record_value: dict) -> str:
+    return record_value.get("version", "0.0.0")
+
+
 @app.get("/ccr/{full_path:path}")
 async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
-    # Parse CCB
+    # Parse the CCBA at-uri/cid out of the URL path. The route receives:
+    #   /ccr/<at-uri>/<cid>
+    # where <at-uri> is itself slash-delimited.
     path = request.url.path.lstrip("/")
-    # split last segment as cid
     if "/" not in path:
         raise HTTPException(400, "missing cid")
     at_part, cid = path.rsplit("/", 1)
@@ -517,52 +535,53 @@ async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
         raise HTTPException(400, "invalid cid")
     if at_part.startswith("ccr/"):
         at_part = at_part[len("ccr/") :]
-    at_uri = at_part
+    ccba_at_uri = at_part
+    ccba_cid = cid
 
-    # Resolve CCB
-    ccb_at_uri = at_uri
-    ccb_cid = cid
-    record_ccb_params = models.ComAtprotoRepoGetRecord.Params(
-        rkey=ccb_at_uri.split("/")[-1],
-        repo=ccb_at_uri.split("/")[2],
-        collection=ccb_at_uri.split("/")[3],
-        uri=ccb_at_uri,
-        cid=ccb_cid,
-    )
-    snoop.pp(record_ccb_params)
-    record_ccb = await client.com.atproto.repo.get_record(
-        record_ccb_params,
-    )
+    # Resolve CCBA
+    record_ccba = await _get_record(ccba_at_uri, ccba_cid)
+    snoop.pp(record_ccba)
+    record_ccba_value = record_ccba.value.to_dict()
+    ccba_version = _record_version(record_ccba_value)
+    if ccba_version == "0.0.0":
+        ccba = CCBA_v0_0_0.model_validate(record_ccba_value)
+    else:
+        raise HTTPException(400, f"unknown CCBA version {ccba_version}")
+    ccba._uri = ccba_at_uri
+    ccba._cid = ccba_cid
+    snoop.pp(ccba)
+
+    # Resolve CCB referenced by CCBA.bid
+    ccb_at_uri = ccba.bid.record.uri
+    ccb_cid = ccba.bid.record.cid
+    record_ccb = await _get_record(ccb_at_uri, ccb_cid)
     snoop.pp(record_ccb)
     record_ccb_value = record_ccb.value.to_dict()
-    ccb_version = record_ccb_value.get("version", "0.0.0")
-    # TODO Log warning on no version
+    ccb_version = _record_version(record_ccb_value)
     if ccb_version == "0.0.0":
         ccb = CCB_v0_0_0.model_validate(record_ccb_value)
     else:
         raise HTTPException(400, f"unknown CCB version {ccb_version}")
-
+    ccb._uri = ccb_at_uri
+    ccb._cid = ccb_cid
     snoop.pp(ccb)
 
-    # Resolve CCRFP
-    record_ccrfp_params = models.ComAtprotoRepoGetRecord.Params(
-        rkey=ccb.embed.record.uri.split("/")[-1],
-        repo=ccb.embed.record.uri.split("/")[2],
-        collection=ccb.embed.record.uri.split("/")[3],
-        uri=ccb.embed.record.uri,
-        cid=ccb.embed.record.cid,
-    )
-    snoop.pp(record_ccrfp_params)
-    record_ccrfp = await client.com.atproto.repo.get_record(
-        record_ccrfp_params,
-    )
+    # Resolve CCRFP referenced by CCBA.embed (the CCBA pins which CCRFP it
+    # is for; we cross-check that it matches the one the CCB embedded).
+    ccrfp_at_uri = ccba.embed.record.uri
+    ccrfp_cid = ccba.embed.record.cid
+    if (
+        ccb.embed.record.uri != ccrfp_at_uri
+        or ccb.embed.record.cid != ccrfp_cid
+    ):
+        raise HTTPException(
+            400,
+            "CCBA.embed (CCRFP) does not match CCB.embed (CCRFP)",
+        )
+    record_ccrfp = await _get_record(ccrfp_at_uri, ccrfp_cid)
     snoop.pp(record_ccrfp)
-    ccrfp_at_uri = record_ccrfp.uri
-    ccrfp_cid = record_ccrfp.cid
-    # Get CCRFP value
     record_ccrfp_value = record_ccrfp.value.to_dict()
-    ccrfp_version = record_ccrfp_value.get("version", "0.0.0")
-    # TODO Log warning on no version
+    ccrfp_version = _record_version(record_ccrfp_value)
     if ccrfp_version == "0.0.0":
         ccrfp = CCRFP_v0_0_0.model_validate(record_ccrfp_value)
     else:
@@ -578,20 +597,28 @@ async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
     record_ccr = await client.com.atproto.repo.create_record(
         models.ComAtprotoRepoCreateRecord.Data(
             repo=client.me.did,
-            collection="com.publicdomainrelay.ccr",
+            collection=CCR_NSID,
             record={
+                "$type": CCR_NSID,
                 "rfp": {
-                    "$type": "com.publicdomainrelay.ccrfp",
+                    "$type": CCRFP_NSID,
                     "record": {
                         "uri": ccrfp_at_uri,
                         "cid": ccrfp_cid,
                     },
                 },
                 "bid": {
-                    "$type": "com.publicdomainrelay.ccb",
+                    "$type": CCB_NSID,
                     "record": {
                         "uri": ccb_at_uri,
                         "cid": ccb_cid,
+                    },
+                },
+                "ccba": {
+                    "$type": CCBA_NSID,
+                    "record": {
+                        "uri": ccba_at_uri,
+                        "cid": ccba_cid,
                     },
                 },
                 "createdAt": client.get_current_time_iso(),
