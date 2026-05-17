@@ -1,129 +1,135 @@
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
 
-# NSID / collection name per record type. While pre-stable we use the
-# `com.publicdomainrelay.temp.*` namespace; once stable, drop `.temp.`
-# and evolve additively. For genuine breaking changes, bump the suffix
-# (e.g. `ccrfpV2`).
-CCRFP_NSID = "com.publicdomainrelay.temp.ccrfp"
-CCB_NSID = "com.publicdomainrelay.temp.ccb"
-CCBAP_NSID = "com.publicdomainrelay.temp.ccbap"
-CCBA_NSID = "com.publicdomainrelay.temp.ccba"
-CCR_NSID = "com.publicdomainrelay.temp.ccr"
+# NSID / collection name per record type. Pre-stable schemas live under
+# `com.publicdomainrelay.temp.*`; once stable, drop `.temp.` and evolve
+# additively. For genuine breaking changes, bump a numeric suffix on the
+# pydantic model (e.g. `RFP_v0_1_0`).
+VM_NSID = "com.publicdomainrelay.temp.compute.vm"
+WIF_SIMPLE_NSID = "com.publicdomainrelay.temp.compute.config.wif.simple"
+RFP_NSID = "com.publicdomainrelay.temp.market.rfp"
+BID_NSID = "com.publicdomainrelay.temp.market.bid"
+BIDS_X402_NSID = "com.publicdomainrelay.temp.market.bids.x402"
+ACCEPT_NSID = "com.publicdomainrelay.temp.market.accept"
+RECEIPT_NSID = "com.publicdomainrelay.temp.market.receipt"
+AGENT_SKILL_NSID = "com.publicdomainrelay.temp.agent.skill"
 
 
-class ATProtoRecordRef(BaseModel):
+class StrongRef(BaseModel):
+    """com.atproto.repo.strongRef ({$type, uri, cid})."""
+
     uri: str
     cid: str
-
-
-class TypedRecordRef(BaseModel):
-    type_: str = Field(alias="$type")
-    record: ATProtoRecordRef
+    type_: Optional[str] = Field(
+        default="com.atproto.repo.strongRef", alias="$type"
+    )
 
     model_config = {"populate_by_name": True}
 
 
-# CCRFP ----------------------------------------------------------------------
+# com.publicdomainrelay.temp.compute.vm -------------------------------------
 
 
-class CCRFP_v0_0_0_Location(BaseModel):
-    country: str
-    region: str
+class VM_v0_0_0_Location(BaseModel):
+    country: Optional[str] = None
+    region: Optional[str] = None
 
 
-class CCRFP_v0_0_0(BaseModel):
+class VM_v0_0_0(BaseModel):
     mem: str
     cpus: int
     disk: str
     network: str
-    location: CCRFP_v0_0_0_Location
     # Be very careful with this! Your did:plc:... can set whatever it wants!
-    # So agents need their own accounts, because if you give them access to
-    # yours they can just create a new form of compute with the whatever role
-    # they want!
+    # Agents need their own accounts; sharing yours lets them mint roles.
     role: str
     user_data: str
+    location: Optional[VM_v0_0_0_Location] = None
 
     _uri: str = None
     _cid: str = None
 
 
-# CCB ------------------------------------------------------------------------
+# com.publicdomainrelay.temp.market.rfp -------------------------------------
 
 
-class CCB_v0_0_0_Embed(TypedRecordRef):
-    pass
+class RFP_v0_0_0(BaseModel):
+    payload: StrongRef
+
+    _uri: str = None
+    _cid: str = None
 
 
-class CCB_v0_0_0_Bid_x402(BaseModel):
-    base_url: str
+# com.publicdomainrelay.temp.market.bids.x402 -------------------------------
 
 
-class CCB_v0_0_0_Bid_WIF(BaseModel):
+class BidsX402_v0_0_0(BaseModel):
+    cost: Any
+    currency: str
+    frequency: str
+    prepay: bool
+    url: str
+
+    _uri: str = None
+    _cid: str = None
+
+
+# com.publicdomainrelay.temp.compute.config.wif.simple ----------------------
+
+
+class WIFSimple_v0_0_0(BaseModel):
     issuer_uri: Optional[str] = None
     to_issue: Optional[str] = None
     token_path: Optional[str] = None
     url_path: Optional[str] = None
     url_route: Optional[str] = None
     subject: Optional[str] = None
-
-
-class CCB_v0_0_0_Bid(BaseModel):
-    cost: float
-    currency: str
-    frequency: str
-    prepay: bool
-    x402: CCB_v0_0_0_Bid_x402
-
-
-class CCB_v0_0_0(BaseModel):
-    embed: CCB_v0_0_0_Embed
-    bid: Optional[CCB_v0_0_0_Bid] = None
-    wif: Optional[CCB_v0_0_0_Bid_WIF] = None
+    accept_path: Optional[str] = None
 
     _uri: str = None
     _cid: str = None
 
 
-# CCBAP ----------------------------------------------------------------------
+# com.publicdomainrelay.temp.market.bid -------------------------------------
 
 
-class CCBAP_v0_0_0_Embed(TypedRecordRef):
-    pass
-
-
-class CCBAP_v0_0_0(BaseModel):
-    embed: CCBAP_v0_0_0_Embed
-    txid: Optional[str] = None
+class Bid_v0_0_0(BaseModel):
+    rfp: StrongRef
+    payload: StrongRef
+    config: Optional[StrongRef] = None
 
     _uri: str = None
     _cid: str = None
 
 
-# CCBA -----------------------------------------------------------------------
+# com.publicdomainrelay.temp.market.accept ----------------------------------
 
 
-class CCBA_v0_0_0_Payment(BaseModel):
-    embed: TypedRecordRef
-
-
-class CCBA_v0_0_0(BaseModel):
-    embed: TypedRecordRef
-    bid: TypedRecordRef
-    payment: CCBA_v0_0_0_Payment
+class Accept_v0_0_0(BaseModel):
+    rfp: StrongRef
+    bid: StrongRef
+    payload: Optional[StrongRef] = None
 
     _uri: str = None
     _cid: str = None
 
 
-# Helpers --------------------------------------------------------------------
+# com.publicdomainrelay.temp.market.receipt ---------------------------------
+
+
+class Receipt_v0_0_0(BaseModel):
+    rfp: StrongRef
+    bid: StrongRef
+    accept: StrongRef
+    payload: Optional[StrongRef] = None
+
+    _uri: str = None
+    _cid: str = None
 
 
 def parse_at_uri(at_uri: str) -> tuple[str, str, str]:
     """Return (repo, collection, rkey) from an at:// URI."""
     parts = at_uri.split("/")
-    # at://<repo>/<collection>/<rkey>
     return parts[2], parts[3], parts[4]
