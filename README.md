@@ -9,33 +9,79 @@ python -m venv .venv && . .venv/bin/activate && uv pip install -e .[dev]
 
 . .venv/bin/activate
 
-RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 nodemon -e py --exec "clear; uv run -m compute_contract_provider_relay_digitalocean.server; test 1"
+RBAC_REPO_ROOT="${HOME}/src/rbac/do/wid-atp" X402_MAKE_FREE=1 \
+BASE_URL="https://compute-contract.johnandersen777.bsky.social.fedproxy.com" \
+  nodemon -e py --exec "clear; uv run -m compute_contract_provider_relay_digitalocean.server; test 1"
 
-curl http://localhost:4021/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccba/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4 | jq
+# Settle: POST the com.publicdomainrelay.temp.market.accept AT URI/CID
+curl http://localhost:4021/receipt/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.accept/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4 | jq
 
-$ npx awal x402 pay https://compute-contract.johnandersen777.bsky.social.fedproxy.com/ccr/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccba/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4
+$ npx awal x402 pay https://compute-contract.johnandersen777.bsky.social.fedproxy.com/receipt/at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.accept/3mlagijgoeb23/bafyreiamisq3yqgb4k3tdojmzvvzpuwj46ytwbj672zxhyxxl7t36qadz4
 ✓ Request completed (HTTP 200)
 
 Response:
 {
   "id": "3mld67yj3xo2u",
-  "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.ccr/3mld67yj3xo2u",
+  "uri": "at://did:plc:5svqtrhheairglgiiyvutzik/com.publicdomainrelay.temp.market.receipt/3mld67yj3xo2u",
   "cid": "bafyreibzynxkkoxxvppbfoeh5s2s2asrm2j7ziw2ol5ufau4q25d7ousiy"
 }
+
+# Auto-bid: webhook fires on firehose commits. Forward each commit to
+# /hook/rfp; the relay creates a bids.x402 payload, a wif.simple config,
+# and a market.bid envelope strongRef'ing the rfp, and replies with the
+# new bid record's strongRef.
+curl -s -X POST http://localhost:4021/hook/rfp \
+  -H 'content-type: application/json' \
+  -d '{
+    "automation": "at://did:plc:5svqtrhheairglgiiyvutzik/run.airglow.automation/3mlywhsfdz222",
+    "lexicon": "com.publicdomainrelay.temp.market.rfp",
+    "event": {
+      "did": "did:plc:lpfuqerea3deuoyrn7ojser4",
+      "kind": "commit",
+      "commit": {
+        "operation": "create",
+        "collection": "com.publicdomainrelay.temp.market.rfp",
+        "rkey": "3mm3doliee72s",
+        "cid": "bafyreib5u2krsumyya5eiqc7ys7iz3xxlourd34p7qlpehi7a7h2kdc3ia",
+        "record": {
+          "$type": "com.publicdomainrelay.temp.market.rfp",
+          "payload": {
+            "$type": "com.atproto.repo.strongRef",
+            "uri": "at://did:plc:lpfuqerea3deuoyrn7ojser4/com.publicdomainrelay.temp.compute.vm/3mm3dolfolz2c",
+            "cid": "bafyreif4toqzci4nu3thujm2quurs4h432qk3gxvmkwze2wrrznn757omi"
+          }
+        }
+      }
+    }
+  }' | jq
 ```
 
-The `/ccr` route takes the **CCBA** (Compute Contract Bid Accept) AT URI/CID,
-not the CCB. The provider resolves the CCBA, then resolves the CCB and CCRFP
-it references, validates that the CCBA's embedded CCRFP matches the one the
-CCB embedded, spins the compute, and writes a CCR record referencing CCRFP,
-CCB, and CCBA.
+The `/receipt` route takes the **Accept**
+(`com.publicdomainrelay.temp.market.accept`) AT URI/CID. The provider
+resolves the Accept, then resolves the Bid (envelope) and RFP (envelope)
+it references, validates that the Bid's `rfp` strongRef matches the
+Accept's `rfp` strongRef, resolves the VM payload via `rfp.payload`,
+spins the compute, and writes a `com.publicdomainrelay.temp.market.receipt`
+record strongRef'ing the RFP, Bid, and Accept.
+
+The `/hook/rfp` route accepts the airglow/firehose webhook envelope
+(see the first JSON object in
+`agent-atproto-digitalocean-typescript/output.log`). When the commit's
+`collection` is `com.publicdomainrelay.temp.market.rfp` it writes:
+
+1. a `com.publicdomainrelay.temp.compute.config.wif.simple` config record,
+2. a `com.publicdomainrelay.temp.market.bids.x402` payload record whose
+   `url` is `{BASE_URL}/receipt/{at}/{cid}` (placeholders filled in by
+   Alice with the Accept's AT URI/CID), and
+3. a `com.publicdomainrelay.temp.market.bid` envelope strongRef'ing the
+   RFP, the config, and the x402 payload.
 
 All record collection / `$type` names live under the
-`com.publicdomainrelay.temp.*` namespace while the schemas are pre-stable
-(e.g. `com.publicdomainrelay.temp.ccrfp`). Once stable they will move to
-`com.publicdomainrelay.<name>` and evolve additively; genuine breaking
-changes get a numeric suffix (`ccrfpV2`, `ccrfpV3`, …). Lexicons for every
-type live in this repo under [`lexicons/`](./lexicons) and upstream at
+`com.publicdomainrelay.temp.*` namespace while the schemas are
+pre-stable. Once stable they will move to `com.publicdomainrelay.<name>`
+and evolve additively; genuine breaking changes get a numeric suffix on
+the pydantic model (e.g. `RFP_v0_1_0`). Lexicons for every type live
+upstream at
 <https://github.com/publicdomainrelay/compute-contract/tree/main/lexicons>.
 
 ## RBAC: droplet-oidc-poc

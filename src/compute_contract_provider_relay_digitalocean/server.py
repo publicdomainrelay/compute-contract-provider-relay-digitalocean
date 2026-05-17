@@ -2,31 +2,26 @@ import os
 import re
 import json
 import asyncio
-import hashlib
 import pathlib
-import tempfile
 import textwrap
 import contextlib
 import subprocess
 import urllib.request
-from typing import Any, Annotated
+from typing import Any, List, Optional, Union
 
 import aiohttp
 import markdown2
-from pydantic import BaseModel
+import yaml
+from pydantic import BaseModel, Field, constr
 from atproto import AsyncClient, models
 from fastapi import (
     FastAPI,
-    File,
-    UploadFile,
     Request,
-    Response,
     HTTPException,
 )
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import snoop
-from fastapi import FastAPI, Request
 
 from x402.http import (
     FacilitatorConfig,
@@ -53,9 +48,17 @@ os.environ["CDP_API_KEY_SECRET"] = os.environ["CDP_RECV_API_KEY_SECRET"]
 # DO_TOKEN
 DO_TOKEN = os.environ["DIGITALOCEAN_TOKEN"]
 RBAC_REPO_ROOT = pathlib.Path(os.environ["RBAC_REPO_ROOT"]).resolve()
+# Public base URL this relay is reachable at (used to build x402 url template
+# for bid records). Falls back to the per-request base_url if unset.
+BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
+
+# Where, on the freshly provisioned VM, the resolved accept bundle is
+# written by cloud-init. The wif.simple record advertises this path with
+# `$HOME` (the VM runs as root, so $HOME=/root resolves to ACCEPT_PATH_VM).
+ACCEPT_PATH_RECORD = "$HOME/secrets/publicdomainrelay.com/market/accept.json"
+ACCEPT_PATH_VM = "/root/secrets/publicdomainrelay.com/market/accept.json"
 
 
-# Generate the JWT using the CDP SDK
 # https://docs.cdp.coinbase.com/api-reference/v2/rest-api/x402-facilitator/verify-a-payment
 # https://docs.cdp.coinbase.com/api-reference/v2/authentication#python
 def mkheaders(host, path, method):
@@ -95,16 +98,12 @@ def create_headers() -> dict[str, dict[str, str]]:
     }
 
 
-# Create facilitator client (testnet)
 facilitator = HTTPFacilitatorClient(
-    # FacilitatorConfig(url="https://x402.org/facilitator")
     FacilitatorConfig(
         url="https://api.cdp.coinbase.com/platform/v2/x402",
         auth_provider=CreateHeadersAuthProvider(create_headers),
     ),
 )
-
-# Create resource server and register EVM scheme
 server = x402ResourceServer(facilitator)
 server.register("eip155:8453", ExactEvmServerScheme())
 
@@ -116,13 +115,10 @@ markdown_html_content_by_file = {}
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
-        # For when in local dev
         markdown_content = (
             pathlib.Path(__file__)
             .parents[2]
-            .joinpath(
-                "README.md",
-            )
+            .joinpath("README.md")
             .read_text()
         )
     except:
@@ -158,25 +154,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# atproto_base_url = os.environ["ATPROTO_BASE_URL"]
 atproto_handle = os.environ["ATPROTO_HANDLE"]
 atproto_password = os.environ["ATPROTO_PASSWORD"]
 
-client = AsyncClient(
-    # base_url=atproto_base_url,
-)
+client = AsyncClient()
 
 app = FastAPI(lifespan=lifespan)
 
-# Define protected routes
+# Define protected routes. /receipt is the post-payment settle endpoint:
+# Alice POSTs the com.publicdomainrelay.temp.market.accept AT URI/CID and
+# the provider spins compute + writes the matching receipt.
 routes: dict[str, RouteConfig] = {
-    "GET /ccr/*": RouteConfig(
+    "GET /receipt/*": RouteConfig(
         accepts=[
             PaymentOption(
                 scheme="exact",
                 pay_to=pay_to,
-                price="$1.00",  # USDC amount in dollars
-                network="eip155:8453",  # Base mainnet
+                price="$1.00",
+                network="eip155:8453",
             ),
         ],
         mime_type="application/json",
@@ -184,8 +179,7 @@ routes: dict[str, RouteConfig] = {
     ),
 }
 
-# Add payment middleware
-if not "X402_MAKE_FREE" in os.environ:
+if "X402_MAKE_FREE" not in os.environ:
     app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
 
@@ -212,9 +206,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 CID_RE = re.compile(r"^(bafy|z)[A-Za-z0-9]+$")
 
-
-from typing import List, Optional, Union
-from pydantic import BaseModel, Field, constr
 
 SlugStr = constr(min_length=1)
 
@@ -248,12 +239,10 @@ class DigitalOceanContext(BaseModel):
 
 async def make_doctx():
     global DO_TOKEN
-    # TODO Run this under a workload id droplet
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DO_TOKEN}",
     }
-    # TODO aiohttp.ClientSession should be in lifecycle
     async with aiohttp.ClientSession() as session:
         async with session.get(
             "https://droplet-oidc.its1337.com/v2/account",
@@ -291,16 +280,13 @@ async def asyncio_create_subprocess_exec(cmd, cwd):
 
 
 async def configure_droplet_rbac(
-    doctx,
-    ccrfp,
-    ccb,
+    doctx: DigitalOceanContext,
+    vm: VM_v0_0_0,
+    requester_did: str,
     req: DOv2DropletCreateRequest,
 ):
-    # TODO Path validation on role
-    # TODO Maybe put this in an ATProto record or something and reference it
     rbac_repo_root = doctx.rbac_repo_root
 
-    # Init repo if not exists
     if not rbac_repo_root.joinpath(".git").is_dir():
         rbac_repo_root.mkdir(exist_ok=True, parents=True)
         cred_helper_contents = """
@@ -317,17 +303,11 @@ while IFS='=' read -r key value; do
 done
 
 echo "username=token"
-# https://git-scm.com/docs/git-credential documents how this style of
-# script works, stdin / stdout is used for communication to / from git
-# and the bash process executing this script. Since we always use the
-# doctl local PAT for authentication to this PoC deployment, we don't need
-# to add custom logic around if this host or if this protocol, we always
-# use the token for the deployed FQDN (git config --global
-# credential."${THIS_ENDPOINT}".helper)
 echo "password=${TOKEN}"
 """.lstrip()
-        # TODO This is bad! Find a new way to do this!
-        cred_helper_contents = cred_helper_contents.replace("{token}", '"' + DO_TOKEN + '"')
+        cred_helper_contents = cred_helper_contents.replace(
+            "{token}", '"' + DO_TOKEN + '"'
+        )
         cred_helper_path = pathlib.Path(
             "~",
             ".local",
@@ -346,10 +326,7 @@ echo "password=${TOKEN}"
                 r'credential.https://droplet-oidc.its1337.com/_rbac/DigitalOcean/.helper',
                 f"!{cred_helper_path.resolve()}",
             ],
-            [
-                "git",
-                "init",
-            ],
+            ["git", "init"],
             [
                 "git",
                 "remote",
@@ -357,32 +334,16 @@ echo "password=${TOKEN}"
                 "origin",
                 f"https://droplet-oidc.its1337.com/_rbac/DigitalOcean/{doctx.team_uuid}",
             ],
-            [
-                "git",
-                "pull",
-                "origin",
-                "main",
-            ],
-            [
-                "git",
-                "branch",
-                "--set-upstream-to=origin/main",
-            ],
+            ["git", "pull", "origin", "main"],
+            ["git", "branch", "--set-upstream-to=origin/main"],
         ]:
             snoop.pp(cmd)
             await asyncio_create_subprocess_exec(cmd, rbac_repo_root)
-    slug = "-".join(
-        [
-            doctx.team_uuid,
-            ccrfp._uri.split("/")[2].split(":")[-1],
-            ccrfp.role,
-        ],
-    )
 
-    policy_path = rbac_repo_root.joinpath(
-        "policies",
-        f"ex-{slug}.hcl",
-    )
+    requester_plc = requester_did.split(":")[-1]
+    slug = "-".join([doctx.team_uuid, requester_plc, vm.role])
+
+    policy_path = rbac_repo_root.joinpath("policies", f"ex-{slug}.hcl")
     policy_ex = """
 path "/v1/oidc/issue" {
   capabilities = ["create"]
@@ -394,24 +355,12 @@ path "/v1/oidc/issue" {
 }
 """.lstrip()
     policy_ex = (
-        policy_ex.replace(
-            "{actx}",
-            doctx.team_uuid,
-        )
-        .replace(
-            "{did-plc-key}",
-            ccrfp._uri.split("/")[2].split(":")[-1],
-        )
-        .replace(
-            "{role}",
-            ccrfp.role,
-        )
+        policy_ex.replace("{actx}", doctx.team_uuid)
+        .replace("{did-plc-key}", requester_plc)
+        .replace("{role}", vm.role)
     )
 
-    role_path = rbac_repo_root.joinpath(
-        "droplet-roles",
-        f"ex-{slug}.hcl",
-    )
+    role_path = rbac_repo_root.joinpath("droplet-roles", f"ex-{slug}.hcl")
     role_ex = """
 role "ex-{slug}" {
   aud      = "api://DigitalOcean?actx={actx}"
@@ -420,78 +369,90 @@ role "ex-{slug}" {
 }
 """.lstrip()
     role_ex = (
-        role_ex.replace(
-            "{actx}",
-            doctx.team_uuid,
-        )
-        .replace(
-            "{did-plc-key}",
-            ccrfp._uri.split("/")[2].split(":")[-1],
-        )
-        .replace(
-            "{role}",
-            ccrfp.role,
-        )
-        .replace(
-            "{slug}",
-            slug,
-        )
+        role_ex.replace("{actx}", doctx.team_uuid)
+        .replace("{did-plc-key}", requester_plc)
+        .replace("{role}", vm.role)
+        .replace("{slug}", slug)
     )
 
+    policy_path.parent.mkdir(exist_ok=True, parents=True)
+    role_path.parent.mkdir(exist_ok=True, parents=True)
     policy_path.write_text(policy_ex)
     role_path.write_text(role_ex)
 
     for cmd in [
-        [
-            "git",
-            "add",
-            "-A",
-        ],
-        [
-            "git",
-            "commit",
-            "-m",
-            "feat: rbac for compute-contract",
-        ],
-        [
-            "git",
-            "push",
-        ],
+        ["git", "add", "-A"],
+        ["git", "commit", "-m", "feat: rbac for compute-contract"],
+        ["git", "push"],
     ]:
         try:
             await asyncio_create_subprocess_exec(cmd, rbac_repo_root)
         except subprocess.CalledProcessError as error:
-            # This happens if ccr occurs against same ccb again
             if cmd[1] == "commit" and b"nothing to commit" in error.stderr:
                 break
 
 
-async def create_droplet(ccrfp, ccb):
+def _strongref_dict(uri: str, cid: str) -> dict[str, str]:
+    return {"$type": "com.atproto.repo.strongRef", "uri": uri, "cid": cid}
+
+
+def _model_to_record(obj) -> dict[str, Any]:
+    return obj.model_dump(by_alias=True, exclude_none=True)
+
+
+def _inject_accept_bundle(user_data: str, bundle: dict[str, Any]) -> str:
+    """Splice a cloud-init write_files entry into existing user_data that
+    drops the fully-resolved accept bundle at ACCEPT_PATH_VM, plus a runcmd
+    that chmods its parent dirs. Mirrors the
+    workload_identity_oauth_reverse_proxy/provisioning.py pattern: parse the
+    existing yaml object (or start one), mutate, re-emit with the
+    #cloud-config header.
+    """
+    user_data_obj: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        parsed = yaml.safe_load(user_data) if user_data else None
+        if isinstance(parsed, dict):
+            user_data_obj = parsed
+    user_data_obj.setdefault("write_files", []).append(
+        {
+            "path": ACCEPT_PATH_VM,
+            "owner": "root:root",
+            "permissions": "0600",
+            "content": json.dumps(bundle, indent=2, sort_keys=True),
+        },
+    )
+    parent = ACCEPT_PATH_VM.rsplit("/", 1)[0]
+    user_data_obj.setdefault("runcmd", []).insert(
+        0,
+        ["sh", "-c", f"install -d -m 0700 -o root -g root {parent}"],
+    )
+    return "#cloud-config\n" + yaml.safe_dump(user_data_obj, sort_keys=False)
+
+
+async def create_droplet(vm: VM_v0_0_0, requester_did: str):
     global DO_TOKEN
-    # TODO Run this under a workload id droplet
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {DO_TOKEN}",
     }
+    requester_plc = requester_did.split(":")[-1]
     request_obj = DOv2DropletCreateRequest(
-        name=f"{ccrfp._uri.split("/")[2].split(":")[-1]}-{ccrfp._uri.split("/")[4]}-{ccrfp._cid}",
-        # TODO pick based off ccrfp.location
+        name=f"{requester_plc}-{vm._uri.split('/')[4]}-{vm._cid}",
+        # TODO pick based off vm.location
         region="sfo3",
         size="s-1vcpu-512mb-10gb",
         image="ubuntu-24-04-x64",
-        user_data=ccrfp.user_data,
+        user_data=vm.user_data,
         with_droplet_agent=True,
         tags=[
-            f'oidc-sub:plc:{ccrfp._uri.split("/")[2].split(":")[-1]}',
-            f"oidc-sub:role:{ccrfp.role}",
+            f"oidc-sub:plc:{requester_plc}",
+            f"oidc-sub:role:{vm.role}",
         ],
     )
     snoop.pp(json.loads(request_obj.model_dump_json()))
-    # TODO make_doctx should be in lifecycle
     doctx = await make_doctx()
-    await configure_droplet_rbac(doctx, ccrfp, ccb, request_obj)
+    await configure_droplet_rbac(doctx, vm, requester_did, request_obj)
     request_bytes = request_obj.model_dump_json().encode()
-    # TODO aiohttp.ClientSession should be in lifecycle
     async with aiohttp.ClientSession() as session:
         async with session.post(
             "https://droplet-oidc.its1337.com/v2/droplets",
@@ -522,113 +483,275 @@ def _record_version(record_value: dict) -> str:
     return record_value.get("version", "0.0.0")
 
 
-@app.get("/ccr/{full_path:path}")
-async def make_ccr(full_path: str, request: Request) -> dict[str, Any]:
-    # Parse the CCBA at-uri/cid out of the URL path. The route receives:
-    #   /ccr/<at-uri>/<cid>
-    # where <at-uri> is itself slash-delimited.
+async def _resolve(at_uri: str, cid: str, cls):
+    record = await _get_record(at_uri, cid)
+    value = record.value.to_dict()
+    version = _record_version(value)
+    if version != "0.0.0":
+        raise HTTPException(400, f"unknown {cls.__name__} version {version}")
+    obj = cls.model_validate(value)
+    obj._uri = at_uri
+    obj._cid = cid
+    return obj
+
+
+@app.get("/receipt/{full_path:path}")
+async def make_receipt(full_path: str, request: Request) -> dict[str, Any]:
+    """Settle endpoint. Path: /receipt/<accept-at-uri>/<cid>.
+
+    Resolves the com.publicdomainrelay.temp.market.accept, walks back to
+    the bid + rfp + vm, spins the droplet, and writes a
+    com.publicdomainrelay.temp.market.receipt referencing all three.
+    """
     path = request.url.path.lstrip("/")
     if "/" not in path:
         raise HTTPException(400, "missing cid")
     at_part, cid = path.rsplit("/", 1)
     if not CID_RE.match(cid):
         raise HTTPException(400, "invalid cid")
-    if at_part.startswith("ccr/"):
-        at_part = at_part[len("ccr/") :]
-    ccba_at_uri = at_part
-    ccba_cid = cid
+    if at_part.startswith("receipt/"):
+        at_part = at_part[len("receipt/"):]
+    accept_at_uri = at_part
+    accept_cid = cid
 
-    # Resolve CCBA
-    record_ccba = await _get_record(ccba_at_uri, ccba_cid)
-    snoop.pp(record_ccba)
-    record_ccba_value = record_ccba.value.to_dict()
-    ccba_version = _record_version(record_ccba_value)
-    if ccba_version == "0.0.0":
-        ccba = CCBA_v0_0_0.model_validate(record_ccba_value)
-    else:
-        raise HTTPException(400, f"unknown CCBA version {ccba_version}")
-    ccba._uri = ccba_at_uri
-    ccba._cid = ccba_cid
-    snoop.pp(ccba)
+    accept = await _resolve(accept_at_uri, accept_cid, Accept_v0_0_0)
+    snoop.pp(accept)
 
-    # Resolve CCB referenced by CCBA.bid
-    ccb_at_uri = ccba.bid.record.uri
-    ccb_cid = ccba.bid.record.cid
-    record_ccb = await _get_record(ccb_at_uri, ccb_cid)
-    snoop.pp(record_ccb)
-    record_ccb_value = record_ccb.value.to_dict()
-    ccb_version = _record_version(record_ccb_value)
-    if ccb_version == "0.0.0":
-        ccb = CCB_v0_0_0.model_validate(record_ccb_value)
-    else:
-        raise HTTPException(400, f"unknown CCB version {ccb_version}")
-    ccb._uri = ccb_at_uri
-    ccb._cid = ccb_cid
-    snoop.pp(ccb)
+    bid = await _resolve(accept.bid.uri, accept.bid.cid, Bid_v0_0_0)
+    snoop.pp(bid)
 
-    # Resolve CCRFP referenced by CCBA.embed (the CCBA pins which CCRFP it
-    # is for; we cross-check that it matches the one the CCB embedded).
-    ccrfp_at_uri = ccba.embed.record.uri
-    ccrfp_cid = ccba.embed.record.cid
-    if (
-        ccb.embed.record.uri != ccrfp_at_uri
-        or ccb.embed.record.cid != ccrfp_cid
-    ):
-        raise HTTPException(
-            400,
-            "CCBA.embed (CCRFP) does not match CCB.embed (CCRFP)",
+    rfp_at_uri = accept.rfp.uri
+    rfp_cid = accept.rfp.cid
+    if bid.rfp.uri != rfp_at_uri or bid.rfp.cid != rfp_cid:
+        raise HTTPException(400, "Accept.rfp does not match Bid.rfp")
+    rfp = await _resolve(rfp_at_uri, rfp_cid, RFP_v0_0_0)
+    snoop.pp(rfp)
+
+    vm = await _resolve(rfp.payload.uri, rfp.payload.cid, VM_v0_0_0)
+    snoop.pp(vm)
+
+    bid_payload = await _resolve(
+        bid.payload.uri, bid.payload.cid, BidsX402_v0_0_0
+    )
+    bid_config = None
+    if bid.config is not None:
+        bid_config = await _resolve(
+            bid.config.uri, bid.config.cid, WIFSimple_v0_0_0
         )
-    record_ccrfp = await _get_record(ccrfp_at_uri, ccrfp_cid)
-    snoop.pp(record_ccrfp)
-    record_ccrfp_value = record_ccrfp.value.to_dict()
-    ccrfp_version = _record_version(record_ccrfp_value)
-    if ccrfp_version == "0.0.0":
-        ccrfp = CCRFP_v0_0_0.model_validate(record_ccrfp_value)
-    else:
-        raise HTTPException(400, f"unknown CCRFP version {ccrfp_version}")
-    ccrfp._uri = ccrfp_at_uri
-    ccrfp._cid = ccrfp_cid
 
+    accept_bundle = {
+        "$type": ACCEPT_NSID,
+        "accept": {
+            "uri": accept._uri,
+            "cid": accept._cid,
+            "value": _model_to_record(accept),
+        },
+        "rfp": {
+            "uri": rfp._uri,
+            "cid": rfp._cid,
+            "value": _model_to_record(rfp),
+        },
+        "bid": {
+            "uri": bid._uri,
+            "cid": bid._cid,
+            "value": _model_to_record(bid),
+        },
+        "bid_payload": {
+            "uri": bid_payload._uri,
+            "cid": bid_payload._cid,
+            "value": _model_to_record(bid_payload),
+        },
+        "bid_config": (
+            {
+                "uri": bid_config._uri,
+                "cid": bid_config._cid,
+                "value": _model_to_record(bid_config),
+            }
+            if bid_config is not None
+            else None
+        ),
+        "vm": {
+            "uri": vm._uri,
+            "cid": vm._cid,
+            "value": _model_to_record(vm),
+        },
+    }
+    vm.user_data = _inject_accept_bundle(vm.user_data, accept_bundle)
+
+    requester_did = parse_at_uri(rfp._uri)[0]
     # TODO Retry Droplet creation if failed
-    # Spin Droplet
-    await create_droplet(ccrfp, ccb)
+    await create_droplet(vm, requester_did)
 
-    # Create CCR
-    record_ccr = await client.com.atproto.repo.create_record(
+    record_receipt = await client.com.atproto.repo.create_record(
         models.ComAtprotoRepoCreateRecord.Data(
             repo=client.me.did,
-            collection=CCR_NSID,
+            collection=RECEIPT_NSID,
             record={
-                "$type": CCR_NSID,
+                "$type": RECEIPT_NSID,
                 "rfp": {
-                    "$type": CCRFP_NSID,
-                    "record": {
-                        "uri": ccrfp_at_uri,
-                        "cid": ccrfp_cid,
-                    },
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": rfp_at_uri,
+                    "cid": rfp_cid,
                 },
                 "bid": {
-                    "$type": CCB_NSID,
-                    "record": {
-                        "uri": ccb_at_uri,
-                        "cid": ccb_cid,
-                    },
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": bid._uri,
+                    "cid": bid._cid,
                 },
-                "ccba": {
-                    "$type": CCBA_NSID,
-                    "record": {
-                        "uri": ccba_at_uri,
-                        "cid": ccba_cid,
-                    },
+                "accept": {
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": accept_at_uri,
+                    "cid": accept_cid,
                 },
                 "createdAt": client.get_current_time_iso(),
             },
         ),
     )
     return {
-        "id": record_ccr.uri.split("/")[-1],
-        "uri": record_ccr.uri,
-        "cid": record_ccr.cid,
+        "id": record_receipt.uri.split("/")[-1],
+        "uri": record_receipt.uri,
+        "cid": record_receipt.cid,
+    }
+
+
+# ---------------------------------------------------------------------------
+# RFP -> Bid webhook hook
+# ---------------------------------------------------------------------------
+
+
+class FirehoseCommit(BaseModel):
+    operation: str
+    collection: str
+    rkey: str
+    record: dict[str, Any]
+    cid: Optional[str] = None
+
+
+class FirehoseEvent(BaseModel):
+    did: str
+    time_us: Optional[int] = None
+    kind: Optional[str] = None
+    commit: FirehoseCommit
+
+
+class WebhookPayload(BaseModel):
+    """Matches the airglow/firehose webhook envelope. See the first JSON
+    object in agent-atproto-digitalocean-typescript/output.log."""
+
+    automation: Optional[str] = None
+    lexicon: Optional[str] = None
+    conditions: Optional[List[dict[str, Any]]] = None
+    event: FirehoseEvent
+
+
+def _x402_url_template(request: Request) -> str:
+    base = BASE_URL or str(request.base_url).rstrip("/")
+    # x402 url template — {at} and {cid} placeholders are filled in by Alice
+    # with the AT URI / CID of the com.publicdomainrelay.temp.market.accept.
+    return f"{base}/receipt/{{at}}/{{cid}}"
+
+
+@app.post("/hook/rfp")
+async def hook_rfp(payload: WebhookPayload, request: Request) -> dict[str, Any]:
+    """Webhook fired on firehose commits. When the commit creates a
+    com.publicdomainrelay.temp.market.rfp record, write a matching
+    com.publicdomainrelay.temp.market.bid (envelope) referencing a freshly
+    created com.publicdomainrelay.temp.market.bids.x402 payload and a
+    com.publicdomainrelay.temp.compute.config.wif.simple config.
+    """
+    commit = payload.event.commit
+    if commit.operation != "create":
+        return {"skipped": "operation", "operation": commit.operation}
+    if commit.collection != RFP_NSID:
+        return {"skipped": "collection", "collection": commit.collection}
+    if not commit.cid:
+        raise HTTPException(400, "commit.cid required")
+
+    rfp_at_uri = f"at://{payload.event.did}/{commit.collection}/{commit.rkey}"
+    rfp_cid = commit.cid
+
+    # Sanity-check by resolving the rfp (also gets the vm strongRef for
+    # future pricing decisions).
+    rfp = await _resolve(rfp_at_uri, rfp_cid, RFP_v0_0_0)
+
+    config_record = await client.com.atproto.repo.create_record(
+        models.ComAtprotoRepoCreateRecord.Data(
+            repo=client.me.did,
+            collection=WIF_SIMPLE_NSID,
+            record={
+                "$type": WIF_SIMPLE_NSID,
+                "accept_path": ACCEPT_PATH_RECORD,
+                "issuer_uri": "https://droplet-oidc.its1337.com",
+                "to_issue": "exchange-custom-droplet-oidc-poc",
+                "token_path": "/root/secrets/digitalocean.com/serviceaccount/token",
+                "url_path": "/root/secrets/digitalocean.com/serviceaccount/base_url",
+                "url_route": "/v1/oidc/issue",
+                "subject": "actx:{actx}:plc:{did-plc-key}:role:{role}",
+                "createdAt": client.get_current_time_iso(),
+            },
+        ),
+    )
+
+    payload_record = await client.com.atproto.repo.create_record(
+        models.ComAtprotoRepoCreateRecord.Data(
+            repo=client.me.did,
+            collection=BIDS_X402_NSID,
+            record={
+                "$type": BIDS_X402_NSID,
+                "cost": 1,
+                "currency": "USDC",
+                "frequency": "monthly",
+                "prepay": True,
+                "url": _x402_url_template(request),
+                "createdAt": client.get_current_time_iso(),
+            },
+        ),
+    )
+
+    bid_record = await client.com.atproto.repo.create_record(
+        models.ComAtprotoRepoCreateRecord.Data(
+            repo=client.me.did,
+            collection=BID_NSID,
+            record={
+                "$type": BID_NSID,
+                "rfp": {
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": rfp_at_uri,
+                    "cid": rfp_cid,
+                },
+                "config": {
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": config_record.uri,
+                    "cid": config_record.cid,
+                },
+                "payload": {
+                    "$type": "com.atproto.repo.strongRef",
+                    "uri": payload_record.uri,
+                    "cid": payload_record.cid,
+                },
+                "createdAt": client.get_current_time_iso(),
+            },
+        ),
+    )
+
+    return {
+        "success": True,
+        "rfp": {"uri": rfp_at_uri, "cid": rfp_cid},
+        "bid": {
+            "$type": "com.atproto.repo.strongRef",
+            "uri": bid_record.uri,
+            "cid": bid_record.cid,
+        },
+        "bid_payload": {
+            "$type": "com.atproto.repo.strongRef",
+            "uri": payload_record.uri,
+            "cid": payload_record.cid,
+        },
+        "bid_config": {
+            "$type": "com.atproto.repo.strongRef",
+            "uri": config_record.uri,
+            "cid": config_record.cid,
+        },
     }
 
 
