@@ -479,7 +479,7 @@ type WebhookPayload = {
 
 function x402UrlTemplate(reqUrl: string): string {
   const base = BASE_URL || new URL(reqUrl).origin;
-  return `${base.replace(/\/+$/, "")}/receipt/{at}/{cid}`;
+  return `${base.replace(/\/+$/, "")}/receipt`;
 }
 
 app.post("/hook/rfp", async (c) => {
