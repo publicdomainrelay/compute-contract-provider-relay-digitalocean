@@ -79,7 +79,7 @@ const BASE_URL = (Deno.env.get("BASE_URL") ?? "").replace(/\/+$/, "");
 const ATPROTO_HANDLE = reqEnv("ATPROTO_HANDLE");
 const ATPROTO_PASSWORD = reqEnv("ATPROTO_PASSWORD");
 const X402_MAKE_FREE = Deno.env.has("X402_MAKE_FREE");
-const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "${DIGITALOCEAN_BASE_URL}").replace(/\/+$/, "");
+const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "https://droplet-oidc.its1337.com").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
 // atproto client + identity resolver
@@ -159,7 +159,7 @@ class HTTPError extends Error {
 type DOContext = { rbacRepoRoot: string; teamUuid: string };
 
 async function makeDoctx(): Promise<DOContext> {
-  const res = await fetch("${DIGITALOCEAN_BASE_URL}/v2/account", {
+  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/account`, {
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
   });
   const json = await res.json();
@@ -211,7 +211,7 @@ echo "password=\${TOKEN}"
 
     const helperAbs = await Deno.realPath(credHelperPath);
     const cmds: string[][] = [
-      ["git", "config", "--global", "credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper", `!${helperAbs}`],
+      ["git", "config", "--global", `credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper`, `!${helperAbs}`],
       ["git", "init"],
       ["git", "remote", "add", "origin", `${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/${doctx.teamUuid}`],
       ["git", "pull", "origin", "main"],
@@ -220,7 +220,10 @@ echo "password=\${TOKEN}"
     for (const cmd of cmds) {
       console.error(`[rbac] ${cmd.join(" ")}`);
       const r = await runProc(cmd, rbac);
-      if (r.code !== 0) throw new Error(`${cmd.join(" ")} failed (${r.code})`);
+      if (r.code !== 0) {
+        if (cmd[1] === "pull" && new TextDecoder().decode(r.stderr).includes("couldn't find remote ref main")) continue;
+        console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+      }
     }
   }
 
@@ -252,12 +255,23 @@ echo "password=\${TOKEN}"
   const commitCmds: string[][] = [
     ["git", "add", "-A"],
     ["git", "commit", "-m", "feat: rbac for compute-contract"],
-    ["git", "push"],
+    ["git", "push", "-u", "origin", "main"],
   ];
   for (const cmd of commitCmds) {
     const r = await runProc(cmd, rbac);
     if (r.code !== 0) {
-      if (cmd[1] === "commit" && new TextDecoder().decode(r.stderr).includes("nothing to commit")) break;
+      if (cmd[1] === "commit" && new TextDecoder().decode(r.stdout).includes("nothing to commit")) continue;
+      console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
+    }
+  }
+
+  const schemaCmds: string[][] = [
+    ["git", "fetch", "--all"],
+    ["bash", "-xec", "git show origin/schema:rbac.json | yq -P"],
+  ];
+  for (const cmd of schemaCmds) {
+    const r = await runProc(cmd, rbac);
+    if (r.code !== 0) {
       console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
     }
   }
@@ -301,7 +315,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   console.error("[do] droplet request:", JSON.stringify(body));
   const doctx = await makeDoctx();
   await configureDropletRbac(doctx, vm, requesterDid);
-  const res = await fetch("${DIGITALOCEAN_BASE_URL}/v2/droplets", {
+  const res = await fetch(`${DIGITALOCEAN_BASE_URL}/v2/droplets`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
     body: JSON.stringify(body),
@@ -499,14 +513,19 @@ app.post("/hook/rfp", async (c) => {
 
   const nowIso = new Date().toISOString();
 
+  const doctx = await makeDoctx();
+
   const configRecord = await agent.com.atproto.repo.createRecord({
     repo: agent.assertDid,
     collection: WIF_SIMPLE_NSID,
     record: {
       $type: WIF_SIMPLE_NSID,
       accept_path: ACCEPT_PATH_RECORD,
-      issuer_uri: "${DIGITALOCEAN_BASE_URL}",
+      issuer_uri: `${DIGITALOCEAN_BASE_URL}`,
+      // TODO policy to_issue = `ex-${slug}`
       to_issue: "exchange-custom-droplet-oidc-poc",
+      // TODO This should be updated in fedproxy-client and lexicon
+      actx: doctx.teamUuid,
       actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
       token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
       url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
