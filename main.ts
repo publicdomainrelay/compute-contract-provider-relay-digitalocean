@@ -4,6 +4,9 @@
 // POST /hook/rfp (firehose webhook -> creates bid+config+payload records).
 //
 // Run: deno run --allow-net --allow-env --allow-run --allow-read --allow-write main.ts
+//
+// $ RBAC_REPO_ROOT="${HOME}/src/rbac/homelab/wid-atp" X402_MAKE_FREE=1 DIGITALOCEAN_BASE_URL=https://homelab.johnandersen777.bsky.social.fedproxy.com deno run --allow-all --watch main.ts
+
 
 import { Hono } from "hono";
 import { Agent, CredentialSession } from "@atproto/api";
