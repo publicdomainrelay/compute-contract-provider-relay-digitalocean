@@ -79,6 +79,7 @@ const BASE_URL = (Deno.env.get("BASE_URL") ?? "").replace(/\/+$/, "");
 const ATPROTO_HANDLE = reqEnv("ATPROTO_HANDLE");
 const ATPROTO_PASSWORD = reqEnv("ATPROTO_PASSWORD");
 const X402_MAKE_FREE = Deno.env.has("X402_MAKE_FREE");
+const DIGITALOCEAN_BASE_URL = (Deno.env.get("DIGITALOCEAN_BASE_URL") ?? "${DIGITALOCEAN_BASE_URL}").replace(/\/+$/, "");
 
 // ---------------------------------------------------------------------------
 // atproto client + identity resolver
@@ -158,7 +159,7 @@ class HTTPError extends Error {
 type DOContext = { rbacRepoRoot: string; teamUuid: string };
 
 async function makeDoctx(): Promise<DOContext> {
-  const res = await fetch("https://droplet-oidc.its1337.com/v2/account", {
+  const res = await fetch("${DIGITALOCEAN_BASE_URL}/v2/account", {
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
   });
   const json = await res.json();
@@ -210,9 +211,9 @@ echo "password=\${TOKEN}"
 
     const helperAbs = await Deno.realPath(credHelperPath);
     const cmds: string[][] = [
-      ["git", "config", "--global", "credential.https://droplet-oidc.its1337.com/_rbac/DigitalOcean/.helper", `!${helperAbs}`],
+      ["git", "config", "--global", "credential.${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/.helper", `!${helperAbs}`],
       ["git", "init"],
-      ["git", "remote", "add", "origin", `https://droplet-oidc.its1337.com/_rbac/DigitalOcean/${doctx.teamUuid}`],
+      ["git", "remote", "add", "origin", `${DIGITALOCEAN_BASE_URL}/_rbac/DigitalOcean/${doctx.teamUuid}`],
       ["git", "pull", "origin", "main"],
       ["git", "branch", "--set-upstream-to=origin/main"],
     ];
@@ -300,7 +301,7 @@ async function createDroplet(vm: VM, requesterDid: string): Promise<unknown> {
   console.error("[do] droplet request:", JSON.stringify(body));
   const doctx = await makeDoctx();
   await configureDropletRbac(doctx, vm, requesterDid);
-  const res = await fetch("https://droplet-oidc.its1337.com/v2/droplets", {
+  const res = await fetch("${DIGITALOCEAN_BASE_URL}/v2/droplets", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${DO_TOKEN}` },
     body: JSON.stringify(body),
@@ -504,8 +505,9 @@ app.post("/hook/rfp", async (c) => {
     record: {
       $type: WIF_SIMPLE_NSID,
       accept_path: ACCEPT_PATH_RECORD,
-      issuer_uri: "https://droplet-oidc.its1337.com",
+      issuer_uri: "${DIGITALOCEAN_BASE_URL}",
       to_issue: "exchange-custom-droplet-oidc-poc",
+      actx_path: "/root/secrets/digitalocean.com/serviceaccount/team_uuid",
       token_path: "/root/secrets/digitalocean.com/serviceaccount/token",
       url_path: "/root/secrets/digitalocean.com/serviceaccount/base_url",
       url_route: "/v1/oidc/issue",
