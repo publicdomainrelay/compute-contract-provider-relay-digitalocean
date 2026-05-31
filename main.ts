@@ -225,6 +225,7 @@ echo "password=\${TOKEN}"
       const r = await runProc(cmd, rbac);
       if (r.code !== 0) {
         if (cmd[1] === "pull" && new TextDecoder().decode(r.stderr).includes("couldn't find remote ref main")) continue;
+        if (cmd[1] === "branch" && new TextDecoder().decode(r.stderr).includes("no commit on branch")) continue;
         console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
       }
     }
@@ -261,11 +262,13 @@ echo "password=\${TOKEN}"
     ["git", "push", "-u", "origin", "main"],
   ];
   for (const cmd of commitCmds) {
+    console.error(`[rbac] running ${cmd.join(" ")}`);
     const r = await runProc(cmd, rbac);
     if (r.code !== 0) {
       if (cmd[1] === "commit" && new TextDecoder().decode(r.stdout).includes("nothing to commit")) continue;
       console.error(`[rbac] ${cmd.join(" ")} failed (${r.code})`);
     }
+    console.error(`[rbac] ran ${cmd.join(" ")} exited code (${r.code})`);
   }
 
   const schemaCmds: string[][] = [
